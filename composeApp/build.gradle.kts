@@ -58,6 +58,8 @@ kotlin {
 
             implementation(libs.coil.compose)
             implementation(libs.coil.network.ktor)
+            // implementation(libs.coil.gif) // Removed
+            implementation(libs.compose.media.player) // Added Media Player
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)

@@ -36,9 +36,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
@@ -85,11 +87,16 @@ import androidx.compose.ui.util.lerp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil3.ImageLoader
 import coil3.compose.AsyncImage
+import coil3.compose.setSingletonImageLoaderFactory
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import kmpapp.composeapp.generated.resources.Res
 import kmpapp.composeapp.generated.resources.banner1
 import kmpapp.composeapp.generated.resources.banner2
 import kmpapp.composeapp.generated.resources.banner3
+import kmpapp.composeapp.generated.resources.snowfall
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -104,6 +111,8 @@ import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.ui.tooling.preview.Preview
 import kotlin.math.absoluteValue
 import kotlin.math.roundToInt
+import chaintech.videoplayer.model.PlayerConfig
+import chaintech.videoplayer.ui.video.VideoPlayerView
 
 enum class SortOption(val displayName: String) {
     NameAsc("Name (A-Z)"),
@@ -117,11 +126,31 @@ enum class FilterType {
     Sort, Category, Rating
 }
 
+// UI State Definition
+sealed interface UiState {
+    data object Loading : UiState
+    data object Success : UiState
+    data class Error(val message: String) : UiState
+}
+
 class HomeViewModel : ViewModel() {
+    private val _uiState = MutableStateFlow<UiState>(UiState.Loading)
+    val uiState = _uiState.asStateFlow()
+
     private val _products = MutableStateFlow<List<Product>>(emptyList())
     
     private val _cartItems = MutableStateFlow<Set<Int>>(emptySet())
     val cartItems = _cartItems.asStateFlow()
+    
+    // Derived state for full Cart Product objects
+    val cartProducts = combine(_products, _cartItems) { products, cartIds ->
+        products.filter { it.id in cartIds }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Derived state for Total Cost
+    val totalCost = cartProducts.map { list ->
+        list.sumOf { it.price }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0.0)
     
     private val repository = HomeRepository()
 
@@ -158,13 +187,20 @@ class HomeViewModel : ViewModel() {
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     init {
+        loadProducts()
+    }
+
+    fun loadProducts() {
         viewModelScope.launch {
+            _uiState.value = UiState.Loading
             try {
                 repository.getProducts().collect { productList ->
                     _products.update { productList }
+                    _uiState.value = UiState.Success
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
+                _uiState.value = UiState.Error("Failed to load products. Check your internet connection.")
             }
         }
     }
@@ -201,6 +237,7 @@ class HomeViewModel : ViewModel() {
 sealed interface Screen {
     data object Home : Screen
     data class Detail(val product: Product) : Screen
+    data object Cart : Screen
 }
 
 @Composable
@@ -216,12 +253,19 @@ fun App() {
                     viewModel = viewModel,
                     onProductClick = { product ->
                         currentScreen = Screen.Detail(product)
-                    }
+                    },
+                    onCartClick = { currentScreen = Screen.Cart }
                 )
             }
             is Screen.Detail -> {
                 ProductDetailScreen(
                     product = screen.product,
+                    viewModel = viewModel,
+                    onBack = { currentScreen = Screen.Home }
+                )
+            }
+            Screen.Cart -> {
+                CartScreen(
                     viewModel = viewModel,
                     onBack = { currentScreen = Screen.Home }
                 )
@@ -234,8 +278,10 @@ fun App() {
 @Composable
 fun HomeScreen(
     viewModel: HomeViewModel,
-    onProductClick: (Product) -> Unit
+    onProductClick: (Product) -> Unit,
+    onCartClick: () -> Unit
 ) {
+    val uiState by viewModel.uiState.collectAsState()
     val filteredProducts by viewModel.filteredProducts.collectAsState()
     val categories by viewModel.categories.collectAsState()
     val selectedCategory by viewModel.selectedCategory.collectAsState()
@@ -283,7 +329,7 @@ fun HomeScreen(
                     )
                 },
                 actions = {
-                    IconButton(onClick = { /* Handle Cart Click */ }) {
+                    IconButton(onClick = onCartClick) {
                         BadgedBox(
                             badge = {
                                 if (cartItems.isNotEmpty()) {
@@ -306,77 +352,123 @@ fun HomeScreen(
             )
         }
     ) { paddingValues ->
-        if (filteredProducts.isEmpty() && categories.isEmpty()) {
-             Column(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                CircularProgressIndicator()
+        when (val state = uiState) {
+            is UiState.Loading -> {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.height(16.dp))
+                    Text("Loading products...")
+                }
             }
-        } else {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(2),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-                    .padding(horizontal = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Carousel Section
-                item(span = { GridItemSpan(2) }) {
-                    HomeCarousel(images = bannerImages)
-                }
-                
-                // Sort & Filter Button and Active Filters
-                item(span = { GridItemSpan(2) }) {
-                    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                        Button(
-                            onClick = { showFilterSheet = true },
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                        ) {
-                            Icon(Icons.Default.FilterList, contentDescription = null)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Sort & Filter")
-                        }
-                        
-                        ActiveFiltersRow(
-                            selectedCategory = selectedCategory,
-                            minRating = minRating,
-                            sortOption = sortOption,
-                            onClearCategory = { if (selectedCategory != null) viewModel.selectCategory(selectedCategory!!) },
-                            onClearRating = { if (minRating != null) viewModel.selectMinRating(minRating!!) },
-                            onResetSort = { viewModel.selectSortOption(SortOption.NameAsc) }
-                        )
+            is UiState.Error -> {
+                Column(
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "Error",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        text = state.message,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    Button(onClick = { viewModel.loadProducts() }) {
+                        Text("Retry")
                     }
                 }
-
-                item(span = { GridItemSpan(2) }) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
-
-                // Product List
-                if (filteredProducts.isEmpty()) {
+            }
+            is UiState.Success -> {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(2),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(paddingValues),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Header Section with Animated Background
                     item(span = { GridItemSpan(2) }) {
-                        Box(
-                            modifier = Modifier.fillMaxWidth().padding(32.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text("No products found", color = Color.Gray)
+                        Box(modifier = Modifier.fillMaxWidth().height(350.dp).background(Color.Black)) {
+                            // Video Player for background
+                            VideoPlayerView(
+                                modifier = Modifier.fillMaxSize(),
+                                url = "https://videocdn.cdnpk.net/videos/9777558a-fb27-5352-bfda-496b64cf0f83/horizontal/previews/clear/large.mp4?token=exp=1766753576~hmac=2a90a49807fa90f672d673c050f0d4e2c7ec4c67d1b5b8e452d4a3b87c2acd98",
+                                playerConfig = PlayerConfig(
+                                    isPauseResumeEnabled = false,
+                                    isSeekBarVisible = false,
+                                    isDurationVisible = false,
+                                    isScreenResizeEnabled = false
+                                )
+                            )
+    
+                            // Content on top of background
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 8.dp, start = 8.dp, end = 8.dp)
+                            ) {
+                                 HomeCarousel(images = bannerImages)
+                                 
+                                 Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                                    Button(
+                                        onClick = { showFilterSheet = true },
+                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.9f),
+                                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                        )
+                                    ) {
+                                        Icon(Icons.Default.FilterList, contentDescription = null)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Sort & Filter")
+                                    }
+                                    
+                                    ActiveFiltersRow(
+                                        selectedCategory = selectedCategory,
+                                        minRating = minRating,
+                                        sortOption = sortOption,
+                                        onClearCategory = { if (selectedCategory != null) viewModel.selectCategory(selectedCategory!!) },
+                                        onClearRating = { if (minRating != null) viewModel.selectMinRating(minRating!!) },
+                                        onResetSort = { viewModel.selectSortOption(SortOption.NameAsc) }
+                                    )
+                                }
+                            }
                         }
                     }
-                } else {
-                    items(filteredProducts) { product ->
-                        ProductCard(
-                            product = product,
-                            isInCart = cartItems.contains(product.id),
-                            onClick = { onProductClick(product) }
-                        )
+    
+                    item(span = { GridItemSpan(2) }) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+    
+                    // Product List
+                    if (filteredProducts.isEmpty()) {
+                        item(span = { GridItemSpan(2) }) {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(32.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("No products found", color = Color.Gray)
+                            }
+                        }
+                    } else {
+                        items(filteredProducts) { product ->
+                            ProductCard(
+                                product = product,
+                                isInCart = cartItems.contains(product.id),
+                                onClick = { onProductClick(product) }
+                            )
+                        }
                     }
                 }
             }
@@ -384,6 +476,151 @@ fun HomeScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CartScreen(
+    viewModel: HomeViewModel,
+    onBack: () -> Unit
+) {
+    val cartProducts by viewModel.cartProducts.collectAsState()
+    val totalCost by viewModel.totalCost.collectAsState()
+
+    Scaffold(
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = { Text("My Cart", fontWeight = FontWeight.Bold) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                }
+            )
+        },
+        bottomBar = {
+            if (cartProducts.isNotEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surface)
+                        .padding(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Total:", style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            text = "$${totalCost.toPrice()}",
+                            style = MaterialTheme.typography.headlineSmall, 
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = { /* Proceed to Checkout */ },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Proceed to Checkout", modifier = Modifier.padding(8.dp))
+                    }
+                }
+            }
+        }
+    ) { paddingValues ->
+        if (cartProducts.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxSize().padding(paddingValues),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Default.ShoppingCart, 
+                        contentDescription = null, 
+                        modifier = Modifier.size(64.dp),
+                        tint = Color.Gray
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Text("Your cart is empty", style = MaterialTheme.typography.titleMedium, color = Color.Gray)
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(paddingValues),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                items(cartProducts) { product ->
+                    CartItemRow(
+                        product = product,
+                        onRemove = { viewModel.toggleCart(product) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CartItemRow(product: Product, onRemove: () -> Unit) {
+    Card(
+        elevation = CardDefaults.cardElevation(2.dp),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AsyncImage(
+                model = product.image,
+                contentDescription = null,
+                modifier = Modifier
+                    .size(80.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.White)
+                    .padding(4.dp),
+                contentScale = ContentScale.Fit
+            )
+            
+            Spacer(Modifier.width(16.dp))
+            
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = product.title,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "$${product.price}",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            
+            IconButton(onClick = onRemove) {
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = "Remove",
+                    tint = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+    }
+}
+
+// ... (Rest of the file remains same: FilterBottomSheetContent, ActiveFiltersRow, HomeCarousel, ProductCard, ProductDetailScreen)
+
+fun Double.toPrice(): String {
+    return ((this * 100).roundToInt() / 100.0).toString()
+}
 @Composable
 fun FilterBottomSheetContent(
     categories: List<String>,
