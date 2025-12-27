@@ -1,7 +1,6 @@
 # 🛍️ KmpApp - Kotlin Multiplatform E-Commerce Shopping App
 
 > A modern, feature-rich shopping application built with **Kotlin Multiplatform (KMP)** and **Jetpack Compose**, delivering a seamless shopping experience across **Android**, **iOS**, and **Desktop** platforms.
-
 ---
 
 ## 📱 Project Overview
