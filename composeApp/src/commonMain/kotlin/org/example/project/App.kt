@@ -113,6 +113,7 @@ import kotlin.math.absoluteValue
 import kotlin.math.roundToInt
 import chaintech.videoplayer.model.PlayerConfig
 import chaintech.videoplayer.ui.video.VideoPlayerView
+import androidx.compose.ui.text.style.TextAlign
 
 enum class SortOption(val displayName: String) {
     NameAsc("Name (A-Z)"),
@@ -133,23 +134,34 @@ sealed interface UiState {
     data class Error(val message: String) : UiState
 }
 
+// Helper function for price formatting (KMP compatible)
+fun formatPrice(value: Double): String {
+    val integerPart = value.toInt()
+    val fractionalPart = ((value - integerPart) * 100).roundToInt()
+    return "$integerPart.${if (fractionalPart < 10) "0$fractionalPart" else fractionalPart}"
+}
+
 class HomeViewModel : ViewModel() {
     private val _uiState = MutableStateFlow<UiState>(UiState.Loading)
     val uiState = _uiState.asStateFlow()
 
     private val _products = MutableStateFlow<List<Product>>(emptyList())
+    val products = _products.asStateFlow() // Expose raw products for recommendations
     
-    private val _cartItems = MutableStateFlow<Set<Int>>(emptySet())
+    // Change: Map of productId to quantity instead of Set
+    private val _cartItems = MutableStateFlow<Map<Int, Int>>(emptyMap())
     val cartItems = _cartItems.asStateFlow()
     
-    // Derived state for full Cart Product objects
-    val cartProducts = combine(_products, _cartItems) { products, cartIds ->
-        products.filter { it.id in cartIds }
+    // Derived state for full Cart Product objects with quantities
+    val cartProducts = combine(_products, _cartItems) { products, cartMap ->
+        products.filter { it.id in cartMap.keys }.map { product ->
+            product to (cartMap[product.id] ?: 1)
+        }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Derived state for Total Cost
     val totalCost = cartProducts.map { list ->
-        list.sumOf { it.price }
+        list.sumOf { (product, quantity) -> product.price * quantity }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0.0)
     
     private val repository = HomeRepository()
@@ -205,14 +217,44 @@ class HomeViewModel : ViewModel() {
         }
     }
 
-    fun toggleCart(product: Product) {
+    fun addToCart(product: Product) {
         _cartItems.update { currentCart ->
-            if (currentCart.contains(product.id)) {
+            val currentQuantity = currentCart[product.id] ?: 0
+            currentCart + (product.id to (currentQuantity + 1))
+        }
+    }
+
+    fun removeFromCart(product: Product) {
+        _cartItems.update { currentCart ->
+            val currentQuantity = currentCart[product.id] ?: 0
+            if (currentQuantity <= 1) {
                 currentCart - product.id
             } else {
-                currentCart + product.id
+                currentCart + (product.id to (currentQuantity - 1))
             }
         }
+    }
+
+    fun setQuantity(productId: Int, quantity: Int) {
+        _cartItems.update { currentCart ->
+            if (quantity <= 0) {
+                currentCart - productId
+            } else {
+                currentCart + (productId to quantity)
+            }
+        }
+    }
+
+    fun getQuantity(productId: Int): Int {
+        return _cartItems.value[productId] ?: 0
+    }
+
+    fun isInCart(productId: Int): Boolean {
+        return _cartItems.value.containsKey(productId)
+    }
+
+    fun clearCart() {
+        _cartItems.value = emptyMap()
     }
 
     fun selectCategory(category: String) {
@@ -238,6 +280,7 @@ sealed interface Screen {
     data object Home : Screen
     data class Detail(val product: Product) : Screen
     data object Cart : Screen
+    data object OrderConfirmation : Screen
 }
 
 @Composable
@@ -261,13 +304,25 @@ fun App() {
                 ProductDetailScreen(
                     product = screen.product,
                     viewModel = viewModel,
-                    onBack = { currentScreen = Screen.Home }
+                    onBack = { currentScreen = Screen.Home },
+                    onRecommendationClick = { product ->
+                        currentScreen = Screen.Detail(product)
+                    }
                 )
             }
             Screen.Cart -> {
                 CartScreen(
                     viewModel = viewModel,
-                    onBack = { currentScreen = Screen.Home }
+                    onBack = { currentScreen = Screen.Home },
+                    onProceedToCheckout = { currentScreen = Screen.OrderConfirmation }
+                )
+            }
+            Screen.OrderConfirmation -> {
+                OrderConfirmationScreen(
+                    viewModel = viewModel,
+                    onOrderComplete = {
+                        currentScreen = Screen.Home
+                    }
                 )
             }
         }
@@ -332,6 +387,8 @@ fun HomeScreen(
                     IconButton(onClick = onCartClick) {
                         BadgedBox(
                             badge = {
+                                // Changed: show number of distinct products in cart (count of keys),
+                                // not the total quantities sum.
                                 if (cartItems.isNotEmpty()) {
                                     Badge {
                                         Text(text = cartItems.size.toString())
@@ -401,9 +458,10 @@ fun HomeScreen(
                     item(span = { GridItemSpan(2) }) {
                         Box(modifier = Modifier.fillMaxWidth().height(350.dp).background(Color.Black)) {
                             // Video Player for background
+
                             VideoPlayerView(
                                 modifier = Modifier.fillMaxSize(),
-                                url = "https://videocdn.cdnpk.net/videos/9777558a-fb27-5352-bfda-496b64cf0f83/horizontal/previews/clear/large.mp4?token=exp=1766753576~hmac=2a90a49807fa90f672d673c050f0d4e2c7ec4c67d1b5b8e452d4a3b87c2acd98",
+                                url = "https://videocdn.cdnpk.net/videos/9777558a-fb27-5352-bfda-496b64cf0f83/horizontal/previews/clear/large.mp4?token=exp=1766787206~hmac=c4a113cec941ba8516989a6d591934c29f4c8236176ecc40fe46b85589dee102",
                                 playerConfig = PlayerConfig(
                                     isPauseResumeEnabled = false,
                                     isSeekBarVisible = false,
@@ -411,6 +469,17 @@ fun HomeScreen(
                                     isScreenResizeEnabled = false
                                 )
                             )
+
+//                            VideoPlayerView(
+//                                modifier = Modifier.fillMaxSize().graphicsLayer { alpha = 0.3f }, // Apply fade
+//                                url = "https://videocdn.cdnpk.net/videos/9777558a-fb27-5352-bfda-496b64cf0f83/horizontal/previews/clear/large.mp4?token=exp=1766753576~hmac=2a90a49807fa90f672d673c050f0d4e2c7ec4c67d1b5b8e452d4a3b87c2acd98",
+//                                playerConfig = PlayerConfig(
+//                                    isPauseResumeEnabled = false,
+//                                    isSeekBarVisible = false,
+//                                    isDurationVisible = false,
+//                                    isScreenResizeEnabled = false
+//                                )
+//                            )
     
                             // Content on top of background
                             Column(
@@ -465,7 +534,7 @@ fun HomeScreen(
                         items(filteredProducts) { product ->
                             ProductCard(
                                 product = product,
-                                isInCart = cartItems.contains(product.id),
+                                isInCart = cartItems.containsKey(product.id),
                                 onClick = { onProductClick(product) }
                             )
                         }
@@ -480,7 +549,8 @@ fun HomeScreen(
 @Composable
 fun CartScreen(
     viewModel: HomeViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onProceedToCheckout: () -> Unit
 ) {
     val cartProducts by viewModel.cartProducts.collectAsState()
     val totalCost by viewModel.totalCost.collectAsState()
@@ -511,7 +581,7 @@ fun CartScreen(
                     ) {
                         Text("Total:", style = MaterialTheme.typography.titleLarge)
                         Text(
-                            text = "$${totalCost.toPrice()}",
+                            text = "$${formatPrice(totalCost)}",
                             style = MaterialTheme.typography.headlineSmall, 
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary
@@ -519,7 +589,7 @@ fun CartScreen(
                     }
                     Spacer(Modifier.height(16.dp))
                     Button(
-                        onClick = { /* Proceed to Checkout */ },
+                        onClick = onProceedToCheckout,
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp)
                     ) {
@@ -551,10 +621,12 @@ fun CartScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                items(cartProducts) { product ->
+                items(cartProducts) { (product, quantity) ->
                     CartItemRow(
                         product = product,
-                        onRemove = { viewModel.toggleCart(product) }
+                        quantity = quantity,
+                        onIncrease = { viewModel.addToCart(product) },
+                        onDecrease = { viewModel.removeFromCart(product) }
                     )
                 }
             }
@@ -563,7 +635,12 @@ fun CartScreen(
 }
 
 @Composable
-fun CartItemRow(product: Product, onRemove: () -> Unit) {
+fun CartItemRow(
+    product: Product,
+    quantity: Int,
+    onIncrease: () -> Unit,
+    onDecrease: () -> Unit
+) {
     Card(
         elevation = CardDefaults.cardElevation(2.dp),
         shape = RoundedCornerShape(12.dp),
@@ -598,29 +675,129 @@ fun CartItemRow(product: Product, onRemove: () -> Unit) {
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = "$${product.price}",
+                    text = "$${formatPrice(product.price * quantity)}",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Bold
                 )
             }
             
-            IconButton(onClick = onRemove) {
+            // Quantity Control Buttons with Animation
+            Row(
+                modifier = Modifier
+                    .background(Color.Gray.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
+                    .padding(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                IconButton(
+                    onClick = onDecrease,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Text(
+                        text = "−",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Text(
+                    text = quantity.toString(),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .width(24.dp)
+                        .graphicsLayer {
+                            scaleX = 1f
+                            scaleY = 1f
+                        },
+                    textAlign = TextAlign.Center
+                )
+
+                IconButton(
+                    onClick = onIncrease,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Text(
+                        text = "+",
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun OrderConfirmationScreen(
+    viewModel: HomeViewModel,
+    onOrderComplete: () -> Unit
+) {
+    var animationPlayed by remember { mutableStateOf(false) }
+    var showMessage by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        animationPlayed = true
+        delay(500) // Delay before showing message
+        showMessage = true
+        delay(3000) // Show message for 3 seconds
+        viewModel.clearCart()
+        onOrderComplete()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        // Animated Tick with Circle
+        Box(
+            modifier = Modifier
+                .size(120.dp)
+                .clip(CircleShape)
+                .background(Color(0xFF4CAF50)),
+            contentAlignment = Alignment.Center
+        ) {
+            if (animationPlayed) {
                 Icon(
-                    Icons.Default.Delete,
-                    contentDescription = "Remove",
-                    tint = MaterialTheme.colorScheme.error
+                    imageVector = Icons.Default.Check,
+                    contentDescription = "Order Confirmed",
+                    tint = Color.White,
+                    modifier = Modifier
+                        .size(80.dp)
+                        .graphicsLayer {
+                            // Scale animation
+                            scaleX = if (animationPlayed) 1f else 0.3f
+                            scaleY = if (animationPlayed) 1f else 0.3f
+                        }
                 )
             }
+        }
+
+        Spacer(modifier = Modifier.height(32.dp))
+
+        // Order confirmation text with fade animation
+        if (showMessage) {
+            Text(
+                text = "Your order has been placed",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.graphicsLayer {
+                    alpha = if (showMessage) 1f else 0f
+                }
+            )
         }
     }
 }
 
 // ... (Rest of the file remains same: FilterBottomSheetContent, ActiveFiltersRow, HomeCarousel, ProductCard, ProductDetailScreen)
 
-fun Double.toPrice(): String {
-    return ((this * 100).roundToInt() / 100.0).toString()
-}
 @Composable
 fun FilterBottomSheetContent(
     categories: List<String>,
@@ -894,12 +1071,13 @@ fun HomeCarousel(images: List<DrawableResource>) {
 fun ProductCard(
     product: Product,
     isInCart: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier // Added modifier parameter
 ) {
     Card(
         elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
         shape = RoundedCornerShape(12.dp),
-        modifier = Modifier
+        modifier = modifier // Use the modifier here
             .fillMaxWidth()
             .clickable { onClick() }
     ) {
@@ -993,41 +1171,95 @@ fun ProductCard(
 fun ProductDetailScreen(
     product: Product,
     viewModel: HomeViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onRecommendationClick: (Product) -> Unit
 ) {
     val scrollState = rememberScrollState()
     val cartItems by viewModel.cartItems.collectAsState()
-    val isInCart = cartItems.contains(product.id)
+    val quantity = cartItems[product.id] ?: 0
+    val isInCart = quantity > 0
+
+    // Recommendations logic
+    val allProducts by viewModel.products.collectAsState()
+    val recommendations = remember(product, allProducts) {
+        allProducts.filter { it.id != product.id }.shuffled().take(5)
+    }
 
     Scaffold(
         floatingActionButtonPosition = FabPosition.Center,
         floatingActionButton = {
-            Button(
-                onClick = { viewModel.toggleCart(product) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isInCart) Color(0xFF4CAF50) else MaterialTheme.colorScheme.primary // Green if added
-                )
-            ) {
-                if (isInCart) {
-                    Icon(
-                        imageVector = Icons.Default.Check,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp)
+            if (isInCart) {
+                // Show quantity controls when item is in cart
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .background(Color(0xFF4CAF50), RoundedCornerShape(12.dp))
+                        .padding(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        IconButton(
+                            onClick = { viewModel.removeFromCart(product) },
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Text(
+                                text = "−",
+                                color = Color.White,
+                                style = MaterialTheme.typography.headlineMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                text = quantity.toString(),
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = "$${formatPrice(product.price * quantity)}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color.White,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { viewModel.addToCart(product) },
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Text(
+                                text = "+",
+                                color = Color.White,
+                                style = MaterialTheme.typography.headlineMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            } else {
+                // Show add to cart button when not in cart
+                Button(
+                    onClick = { viewModel.addToCart(product) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+                ) {
                     Text(
-                        text = "Added to Cart",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(vertical = 8.dp)
-                    )
-                } else {
-                    Text(
-                        text = "Add to Cart  $${product.price}",
+                        text = "Add to Cart  $${formatPrice(product.price)}",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(vertical = 8.dp)
@@ -1140,8 +1372,34 @@ fun ProductDetailScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         lineHeight = 24.sp
                     )
+                    
+                    Spacer(modifier = Modifier.height(32.dp))
+                    
+                    // Recommendations Section
+                    if (recommendations.isNotEmpty()) {
+                        Text(
+                            text = "Recommendations",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            items(recommendations) { recommendedProduct ->
+                                ProductCard(
+                                    product = recommendedProduct,
+                                    isInCart = cartItems.containsKey(recommendedProduct.id),
+                                    onClick = { onRecommendationClick(recommendedProduct) },
+                                    modifier = Modifier.width(180.dp) // Fixed width for horizontal items
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 }
+
