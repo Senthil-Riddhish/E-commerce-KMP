@@ -387,11 +387,9 @@ fun HomeScreen(
                     IconButton(onClick = onCartClick) {
                         BadgedBox(
                             badge = {
-                                // Changed: show number of distinct products in cart (count of keys),
-                                // not the total quantities sum.
                                 if (cartItems.isNotEmpty()) {
                                     Badge {
-                                        Text(text = cartItems.size.toString())
+                                        Text(text = cartItems.values.sum().toString())
                                     }
                                 }
                             }
@@ -1402,4 +1400,3 @@ fun ProductDetailScreen(
         }
     }
 }
-
